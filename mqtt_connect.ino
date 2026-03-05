@@ -1,61 +1,120 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
+// // WiFi Settings
+// const char *ssid = "Plymouth";         // Same network as MQTT broker
+// const char *password = "rwee2763";
+
 // MQTT Broker Settings
-const char *mqtt_broker = "192.168.4.2"; // Remove the trailing space!
-const char *topic = "test_topic"; // Remove space from topic name
+const char *mqtt_broker = "192.168.4.2";
+const char *dist_topic = "esp32/distance";
 const char *mqtt_username = "master";
 const char *mqtt_password = "masterpass";
-const int mqtt_port = 1883; 
+const int mqtt_port = 1883;
+
+#define SOUND_SPEED 0.034
+const int trigPin = 5;
+const int echoPin = 18; 
+long duration;
+float distance;
 
 // Initialize Clients
-WiFiClient espClient; // Changed from WiFiClientSecure
+WiFiClient espClient;
 PubSubClient client(espClient);
 
 // Callback function
 void callback(char *topic, byte *payload, unsigned int length) {
-    Serial.print("Message arrived in topic: ");
-    Serial.println(topic);
-    Serial.print("Message: ");
+    Serial.print("Message received on ");
+    Serial.print(topic);
+    Serial.print(": ");
     for (int i = 0; i < length; i++) {
         Serial.print((char) payload[i]);
     }
-    Serial.println("\n-----------------------");
+    Serial.println();
 }
 
-void setup() {
-    Serial.begin(115200);
-    delay(2000);
-    Serial.println("\n=== Starting ESP32 as Access Point ===");
-    
-    // 1. Create Access Point
-    WiFi.softAP("ESP32_Broker", "12345678");
-    Serial.println("Access Point Started");
-    Serial.print("AP IP Address: ");
-    Serial.println(WiFi.softAPIP()); // Should be 192.168.4.1
-    
-    // 2. Setup MQTT (connecting to broker on THIS device)
-    client.setServer(mqtt_broker, mqtt_port);
-    client.setCallback(callback);
-    
-    // 3. Connect to MQTT Broker
+// void connectWiFi() {
+//     WiFi.mode(WIFI_STA);
+//     WiFi.begin(ssid, password);
+//     Serial.print("Connecting to WiFi");
+//     while (WiFi.status() != WL_CONNECTED) {
+//         delay(500);
+//         Serial.print(".");
+//     }
+//     Serial.println("\nWiFi Connected!");
+//     Serial.print("IP Address: ");
+//     Serial.println(WiFi.localIP());
+// }
+
+void reconnect() {
     while (!client.connected()) {
         String client_id = "esp32-client-" + String(WiFi.macAddress());
-        Serial.printf("Connecting to MQTT as %s...\n", client_id.c_str());
-        
+        Serial.println("Connecting to MQTT...");
+
         if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
             Serial.println("MQTT Connected!");
-            client.publish(topic, "Hi, I'm ESP32 AP");
-            client.subscribe(topic);
+            client.subscribe(dist_topic);
         } else {
             Serial.print("Failed, rc=");
-            Serial.print(client.state());
-            Serial.println(" - try again in 5 seconds");
+            Serial.println(client.state());
             delay(5000);
         }
     }
 }
 
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+    Serial.println("\n=== Starting ESP32 ===");
+
+     // Start Access Point
+    WiFi.softAP("ESP32_Broker", "12345678");
+    Serial.println("Access Point Started");
+    Serial.print("AP IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    pinMode(trigPin,OUTPUT);
+    pinMode(echoPin, INPUT); 
+
+    // Setup MQTT
+    client.setServer(mqtt_broker, mqtt_port);
+    client.setCallback(callback);
+
+    // Initial MQTT connection
+    reconnect();
+   
+}
+
 void loop() {
+    // Maintain MQTT connection
+    if (!client.connected()) {
+        reconnect();
+    }
     client.loop();
+
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin,HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+
+    duration = pulseIn(echoPin, HIGH);
+
+    distance = duration * SOUND_SPEED/2;
+
+    char distString[10];
+    dtostrf(distance,1,2,distString);
+
+
+
+    // Publish to MQTT
+        if (client.publish(dist_topic, distString)) {
+            Serial.print("distance: ");
+            Serial.print(distString);
+        } else {
+            Serial.println("Failed to publish distance");
+        }
+        delay(1000);
+
+
 }
