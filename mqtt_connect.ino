@@ -1,6 +1,16 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
+/*CHANGES TO MAKE
+    - first 10 seconds when "pump" LED is on, find threshold value 
+        - threshold value found thru average value in that time 
+        - once found, go into ready state
+    - avg out every 10 readings to send out thru mqtt  
+    - send state of LED "valve" to mqtt 
+    - if over threshold, blockage state 
+    - if under threshold, leakage state 
+*/
+
 // // WiFi Settings
 // const char *ssid = "Plymouth";         // Same network as MQTT broker
 // const char *password = "rwee2763";
@@ -15,6 +25,7 @@ const int mqtt_port = 1883;
 #define SOUND_SPEED 0.034
 const int trigPin = 5;
 const int echoPin = 18; 
+const int ledPin = 2;
 long duration;
 float distance;
 
@@ -22,15 +33,31 @@ float distance;
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// Callback function
+// Callback function, processes messages recieved 
 void callback(char *topic, byte *payload, unsigned int length) {
+    if (strcmp(topic, "esp32/distance") == 0) return;
+
+    char msg_char [length+1];
     Serial.print("Message received on ");
     Serial.print(topic);
     Serial.print(": ");
     for (int i = 0; i < length; i++) {
-        Serial.print((char) payload[i]);
+        msg_char[i] = (char) payload[i];
     }
+    msg_char[length] = '\0';  
+    Serial.print(msg_char); 
     Serial.println();
+
+    if(strcmp(topic, "esp32/distance") == 0) return;
+
+    if(strcmp(topic, "esp32/LED") == 0){
+        if(strcmp(msg_char, "ON") == 0){
+            digitalWrite(ledPin, HIGH);
+        }
+        else if(strcmp(msg_char, "OFF") == 0){
+            digitalWrite(ledPin,LOW);
+        }
+    }
 }
 
 // void connectWiFi() {
@@ -53,7 +80,14 @@ void reconnect() {
 
         if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
             Serial.println("MQTT Connected!");
-            client.subscribe(dist_topic);
+            if(client.subscribe("esp32/LED")){
+
+                Serial.println("subbed to LED");
+            }
+            else{
+                Serial.println("sub failed");
+            }
+            //client.subscribe(dist_topic);
         } else {
             Serial.print("Failed, rc=");
             Serial.println(client.state());
@@ -75,6 +109,7 @@ void setup() {
 
     pinMode(trigPin,OUTPUT);
     pinMode(echoPin, INPUT); 
+    pinMode(ledPin, OUTPUT);
 
     // Setup MQTT
     client.setServer(mqtt_broker, mqtt_port);
@@ -84,6 +119,38 @@ void setup() {
     reconnect();
    
 }
+void publish_msg(msg, topic)){
+    // Publish to MQTT
+    if (client.publish(topic, msg)) {
+        Serial.print("published" + msg + "success");
+    } else {
+        Serial.println("Failed to publish");
+    }
+}
+
+int distance_measure(){
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin,HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+
+    duration = pulseIn(echoPin, HIGH,30000);
+    return duration * SOUND_SPEED/2;
+}
+
+// measure every 10 ms to end with 100 readings over 10s and average them out 
+int find_threshold(){
+    for(int i= 0; i<100; i++){}
+        distance_tot += distance_measure();
+        wait(); //make it 10 ms 
+    }
+    avg = distance_tot/100
+    sd = 0; 
+
+    return avg, sd;
+}
+
 
 void loop() {
     // Maintain MQTT connection
@@ -91,30 +158,30 @@ void loop() {
         reconnect();
     }
     client.loop();
+    int dist_threshold = find_threshold();
+    static unsigned long lastRead = 0;
+    if (millis() - lastRead >= 1000) {
+        lastRead = millis();
 
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(trigPin,HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigPin, LOW);
+        distance = distance_measure();
+        
+        char distString[10];
 
-    duration = pulseIn(echoPin, HIGH);
-
-    distance = duration * SOUND_SPEED/2;
-
-    char distString[10];
-    dtostrf(distance,1,2,distString);
-
-
-
-    // Publish to MQTT
-        if (client.publish(dist_topic, distString)) {
-            Serial.print("distance: ");
-            Serial.print(distString);
-        } else {
-            Serial.println("Failed to publish distance");
+        if(distance_count <=10){
+            distance_tot += distance;
         }
-        delay(1000);
+        else{
+            distance_avg = distance_tot/10;
+
+            dtostrf(distance_avg,1,2,distString);
+            publish_msg(distString, distance); 
+            distance_tot = 0;
+
+        }
+
+ 
+        client.loop();
+    }
 
 
 }
