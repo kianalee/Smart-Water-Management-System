@@ -17,16 +17,16 @@ const char *mqtt_password = "masterpass";
 const int mqtt_port = 1883;
 
 #define SOUND_SPEED 0.034
-// #define DHTPIN 26
-// #define DHTTYPE DHT22
-// DHT dht(DHTPIN, DHTTYPE);
+#define DHTPIN 23
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
 const int trigPin = 5;
 const int echoPin = 18; 
 const int ledPin = 2;
-//const int led2Pin = 3;
+const int led2Pin = 16;
 long duration;
 float distance;
-int dist_threshold, dist_sd, temp_threshold, temp_sd;
+float dist_threshold, dist_sd, temp_threshold, temp_sd;
 
 
 // Initialize Clients
@@ -93,11 +93,11 @@ void setup() {
     Serial.print("AP IP Address: ");
     Serial.println(WiFi.softAPIP());
 
-    //dht.begin();
+    dht.begin();
     pinMode(trigPin,OUTPUT);
     pinMode(echoPin, INPUT); 
     pinMode(ledPin, OUTPUT);
-   // pinMode(led2Pin, OUTPUT);
+    pinMode(led2Pin, OUTPUT);
 
     // Setup MQTT
     client.setServer(mqtt_broker, mqtt_port);
@@ -107,9 +107,9 @@ void setup() {
     find_threshold(&dist_threshold, &dist_sd, 1);
     Serial.println("distance threshold is ");
     Serial.print(dist_threshold);
-    // find_threshold(&temp_threshold, &temp_sd, 2);
-    // Serial.println("temperature threshold is " );
-    // Serial.print(temp_threshold); 
+    find_threshold(&temp_threshold, &temp_sd, 2);
+    Serial.println("temperature threshold is " );
+    Serial.print(temp_threshold); 
 
     // Initial MQTT connection
     reconnect();
@@ -118,7 +118,7 @@ void setup() {
 void publish_msg(String msg, const char* topic){
     // Publish to MQTT
     if (client.publish(topic, msg.c_str())) {
-        Serial.print("published" + msg + "success");
+        Serial.println("published " + msg + " success to " + topic);
     } else {
         Serial.println("Failed to publish");
     }
@@ -142,20 +142,24 @@ float sensor_measure(int type){
 
 // measure every 10 ms to end with 100 readings over 10s and average them out 
 // Pass pointers for avg and sd — function writes results into them
-void find_threshold(int *avg, int *sd, int type) {
+void find_threshold(float *avg, float *sd, int type) {
     int reading_tot = 0;  // fixed: was declared inside loop, also missing initializer
-
-    for (int i = 0; i < 30; i++) {
-        reading_tot += sensor_measure(type);
-        if(type == 1){
+     if(type == 1){
+        for (int i = 0; i < 30; i++) {
+            reading_tot += sensor_measure(1);
             delay(30);
-        }
-        else{
+        }  
+        *avg = reading_tot /30;
+ 
+    }
+    else{
+        for (int i = 0; i < 5; i++) {
+            reading_tot += sensor_measure(1);
             delay(2000);
-        }
+        }   
+        *avg = reading_tot /5;
     }
 
-    *avg = reading_tot /30;
     *sd = 0;
 }
 
@@ -183,7 +187,7 @@ void loop() {
 
 
         float distance_avg = distance_tot/10;
-        // float temp_avg = sensor_measure(2);
+        float temp_avg = sensor_measure(2);
 
         //-----distance sensor----------
         char distString[10];
@@ -194,23 +198,26 @@ void loop() {
         if(distance_avg<(dist_threshold - dist_sd) || distance_avg >(dist_threshold + dist_sd)){
             digitalWrite(ledPin, HIGH);
             publish_msg("ON", led_topic);
-            delay(10);
+
+        }
+        else{
             digitalWrite(ledPin,LOW);
             publish_msg("OFF", led_topic);
         }
 
         //-----temperature sensor----------
-        // char tempString[10];
-        // dtostrf(temp_avg,1,2,tempString);
-        // publish_msg(tempString, temp_topic);
+        char tempString[10];
+        dtostrf(temp_avg,1,2,tempString);
+        publish_msg(tempString, temp_topic);
 
-        // if(temp_avg<(temp_threshold - temp_sd) || temp_avg >(temp_threshold + temp_sd)){
-        //     digitalWrite(led2Pin, HIGH);
-        //     publish_msg("ON", led2_topic);
-        //     delay(10);
-        //     digitalWrite(led2Pin,LOW);
-        //     publish_msg("OFF", led2_topic);
-        // }
+        if(temp_avg<(temp_threshold - temp_sd) || temp_avg >(temp_threshold + temp_sd)){
+            digitalWrite(led2Pin, HIGH);
+            publish_msg("ON", led2_topic);
+        }
+        else{
+            digitalWrite(led2Pin,LOW);
+            publish_msg("OFF", led2_topic);
+        }
 
         distance_tot = 0;
         temp_tot = 0;
