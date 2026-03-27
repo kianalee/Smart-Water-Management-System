@@ -12,7 +12,12 @@ const db = new Database('sensor_data.db');
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS distance_readings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY,
+        value REAL NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    CREATE TABLE IF NOT EXISTS temperature_readings (
+        id INTEGER PRIMARY KEY,
         value REAL NOT NULL,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -28,7 +33,8 @@ const mqttClient = mqtt.connect('mqtt://192.168.4.2:1883', {
 
 mqttClient.on('connect', () => {
     console.log('Connected to MQTT broker');
-    mqttClient.subscribe('esp32/distance');
+    mqttClient.subscribe('esp32/distance', { nl: true });
+    mqttClient.subscribe('esp32/temp', {n1:true});
 });
 
 mqttClient.on('message', (topic, message) => {
@@ -39,12 +45,19 @@ mqttClient.on('message', (topic, message) => {
         return;
     }
 
-    const insert = db.prepare('INSERT INTO distance_readings (value) VALUES (?)');
-    insert.run(value);
-    console.log(`Saved [${topic}]: ${value} cm`);
+    if (topic =='esp32/distance'){
+        const insert = db.prepare('INSERT INTO distance_readings (value) VALUES (?)');
+        insert.run(value);
+        console.log(`Saved [distance]: ${value} cm`);
+    }
+    else if (topic =='esp32/temp'){
+        const insert = db.prepare('INSERT INTO temperature_readings (value) VALUES (?)');
+        insert.run(value);
+        console.log(`Saved [temperature]: ${value} °C`);
+    }
 });
 
-// ─── REST API Endpoints ────────────────────────────────────────
+// ─── REST API Endpoints (distance) ────────────────────────────────────────
 
 // Get all readings
 app.get('/api/distance', (req, res) => {
@@ -68,6 +81,32 @@ app.get('/api/distance/last/:n', (req, res) => {
 // Delete all readings (useful for testing)
 app.delete('/api/distance', (req, res) => {
     db.prepare('DELETE FROM distance_readings').run();
+    res.json({ message: 'All readings deleted' });
+});
+// ─── REST API Endpoints (temperature) ────────────────────────────────────────
+
+// Get all readings
+app.get('/api/temperature', (req, res) => {
+    const rows = db.prepare('SELECT * FROM temperature_readings ORDER BY timestamp DESC').all();
+    res.json(rows);
+});
+
+// Get latest reading only
+app.get('/api/temperature/latest', (req, res) => {
+    const row = db.prepare('SELECT * FROM temperature_readings ORDER BY timestamp DESC LIMIT 1').get();
+    res.json(row);
+});
+
+// Get last N readings e.g. /api/distance/last/10
+app.get('/api/temperature/last/:n', (req, res) => {
+    const n = parseInt(req.params.n);
+    const rows = db.prepare('SELECT * FROM temperature_readings ORDER BY timestamp DESC LIMIT ?').all(n);
+    res.json(rows);
+});
+
+// Delete all readings (useful for testing)
+app.delete('/api/temperature', (req, res) => {
+    db.prepare('DELETE FROM temperature_readings').run();
     res.json({ message: 'All readings deleted' });
 });
 
