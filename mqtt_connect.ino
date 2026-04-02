@@ -1,260 +1,565 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
-
-// // WiFi Settings
-// const char *ssid = "Plymouth";         // Same network as MQTT broker
-// const char *password = "rwee2763";
+#include <Wire.h>
+#include <U8g2lib.h>
 
 // MQTT Broker Settings
-const char *mqtt_broker = "192.168.4.2";
+const char *mqtt_broker = "192.168.4.2"; 
 const char *mqtt_username = "master";
 const char *mqtt_password = "masterpass";
-const int mqtt_port = 1883;
+const int mqtt_port = 1883; 
 
 const char *pressure_topic = "esp32/pressure";
-const char *flow_topic = "esp32/flow";
+const char *pump_topic = "esp32/flow";
 const char *pump_topic = "esp32/pump";
 const char *topVal_topic = "esp32/top_valve";
 const char *bottomVal_topic = "esp32/bottom_valve";
-
 const char *ready_topic = "system_ready";
 const char *status_topic = "system_status";
-const char *override_topic = "override_status";
+const char *topic_8 = "override_status";
 
-const int PRESS_PIN = 1;
-const int FLOW_PIN = 2; 
-const int TOP_VALVE_PIN = 3;
-const int BOTTOM_VALVE_PIN = 4;
-const int PUMP_PIN = 5;
 
-const int PressT_count = 30;
-const int FlowT_count = 30;
-int flow_count;
-float press_threshold, press_sd, flow_threshold, flow_sd;
-
+unsigned long lastFlowUpdate = 0;
+unsigned long lastPressureRead = 0;
+const unsigned long pressureInterval = 500; // 0.5 seconds
 
 // Initialize Clients
-WiFiClient espClient;
+WiFiClient espClient; 
 PubSubClient client(espClient);
 
+// ESP32 pins 
+const int pump = 32;
+const int top_valve = 33;
+const int bottom_valve = 25;
+const int tank_strip = 26;
 
-// Callback function, processes messages recieved 
+
+void OpenTopValve() {
+  digitalWrite(top_valve, HIGH);
+  client.publish(topVal_topic, "OPEN");
+}
+
+void OpenBottomValve() {
+  digitalWrite(bottom_valve, HIGH);
+  client.publish(bottomVal_topic, "OPEN");
+}
+
+void TurnOnTankStrip() {
+  ledcWrite(tank_strip, 255);   // full brightness
+}
+
+void TurnOffPump() {
+  digitalWrite(pump, LOW);
+}
+
+void CloseTopValve() {
+  digitalWrite(top_valve, LOW);
+  client.publish(topVal_topic, "CLOSE");
+}
+
+void CloseBottomValve() {
+  digitalWrite(bottom_valve, LOW);
+  client.publish(bottomVal_topic, "CLOSE");
+}
+
+void TurnOffTankStrip() {
+  ledcWrite(tank_strip, 0);   // full brightness
+}
+
+
+const int pump_enable = 19;
+const int top_enable = 18;
+const int bottom_enable = 17;
+const int ready_enable = 16;
+
+
+
+bool isPumpEnableOn() { return digitalRead(pump_enable) == HIGH; }
+bool isTopEnableOn() { return digitalRead(top_enable) == HIGH; }
+bool isBottomEnableOn() { return digitalRead(bottom_enable) == HIGH; }
+bool isReadyEnableOn() { return digitalRead(ready_enable) == HIGH; }
+
+
+//Sensors
+const int pressureSensorPin = 35;
+
+const int flowSensorPin = 34;
+volatile int pulseCount = 0;
+float flowRate = 0;
+
+void IRAM_ATTR countPulse() {
+  pulseCount++;
+}
+
+
+float getPressure() {
+    int rawPressure = analogRead(pressureSensorPin);
+    float voltage = (rawPressure / 4095.0) * 3.3;
+    float PSI = (voltage / 3.3) * 5.0;
+    return PSI;
+}
+
+
+
+//OLED screen
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
+
+void OLED(int x, int y, const char* text) {
+    u8g2.drawStr(x, y, text); 
+}
+
+// =====================================================
+// DISPLAY HELPERS
+// =====================================================
+
+void drawCenteredText(const char* text, int y) {
+  int w = u8g2.getStrWidth(text);
+  int x = (128 - w) / 2;
+  u8g2.drawStr(x, y, text);
+}
+
+void displayStatus(const char* line1, const char* line2) {
+  u8g2.clearBuffer();
+
+  u8g2.setFont(u8g2_font_ncenB10_tr);
+  drawCenteredText(line1, 25);
+  drawCenteredText(line2, 40);
+
+  u8g2.sendBuffer();
+}
+
+void displayPressureAndFlow(float psi, float flow, float Pthreshold, float Fthreshold) {
+  char line1[30];
+  char line2[30];
+  char psiStr[10];
+  char flowStr[10];
+
+  dtostrf(psi, 4, 2, psiStr);
+  dtostrf(flow, 4, 2, flowStr);
+
+  sprintf(line1, "%s PSI", psiStr);
+  sprintf(line2, "%s L/min", flowStr);
+
+  u8g2.clearBuffer();
+
+  u8g2.setFont(u8g2_font_ncenB10_tr);
+  drawCenteredText(line1, 15);
+  drawCenteredText(line2, 40);
+
+  char buffer[50];
+  snprintf(buffer, sizeof(buffer), "P:%.2f  F:%.2f", Pthreshold, Fthreshold);
+
+  u8g2.setFont(u8g2_font_5x8_tr);   // smaller font
+  drawCenteredText(buffer, 62);
+
+  u8g2.sendBuffer();
+}
+
+
+// Callback function
 void callback(char *topic, byte *payload, unsigned int length) {
-    char msg_char [length+1];
-    Serial.print("Message received on ");
-    Serial.print(topic);
-    Serial.print(": ");
+    Serial.print("Message arrived in topic: ");
+    Serial.println(topic);
+    Serial.print("Message: ");
     for (int i = 0; i < length; i++) {
-        msg_char[i] = (char) payload[i];
+        Serial.print((char) payload[i]);
     }
-    msg_char[length] = '\0';  
-    Serial.print(msg_char); 
-    Serial.println();
-
-    //if(strcmp(topic, "esp32/distance") == 0) return;
+    Serial.println("\n-----------------------");
 }
+void SetupMQTT() {
+    Serial.println("\n=== Starting ESP32 as Access Point ===");
 
-// void connectWiFi() {
-//     WiFi.mode(WIFI_STA);
-//     WiFi.begin(ssid, password);
-//     Serial.print("Connecting to WiFi");
-//     while (WiFi.status() != WL_CONNECTED) {
-//         delay(500);
-//         Serial.print(".");
-//     }
-//     Serial.println("\nWiFi Connected!");
-//     Serial.print("IP Address: ");
-//     Serial.println(WiFi.localIP());
-// }
-
-void reconnect() {
-    while (!client.connected()) {
-        String client_id = "esp32-client-" + String(WiFi.macAddress());
-        Serial.println("Connecting to MQTT...");
-
-        if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
-            Serial.println("MQTT Connected!");
-        } else {
-            Serial.print("Failed, rc=");
-            Serial.println(client.state());
-            delay(5000);
-        }
-    }
-}
-
-
-void publish_msg(String msg, const char* topic){
-    // Publish to MQTT
-    if (client.publish(topic, msg.c_str())) {
-        Serial.println("published " + msg + " success to " + topic);
-    } else {
-        Serial.println("Failed to publish");
-    }
-}
-
-float volts_to_psi(float volts){
-    return(volts - 0.5)/4*150; //150 psi max, 0.5V min, 4.5V max
-}
-
-void flow() {
-    flow_count++;
-}
-
-float sensor_measure(int type){
-    if(type == 1){
-        analogReadResolution(12);
-        int voltage = analogRead(PRESS_PIN);
-        float psi = volts_to_psi((voltage/4095)*3.3);
-        return psi;
-    }
-    else {
-        //flow freq * 60mins / 7.5 Q
-        noInterrupts();
-        int pulses = flow_count;
-        flow_count =0;
-        interrupts();
-        //take counted pulses in last second, multiply by 2.25 to get flow in L/min (7.5 Q = 1L/min, so 1 pulse = 1/7.5 L/min, and we measure every second so multiply by 60 to get per minute)
-        return pulses*60/7.5 ;
-    }
-}
-
-// measure every 10 ms to end with 100 readings over 10s and average them out 
-// Pass pointers for avg and sd — function writes results into them
-void find_threshold(float *avg, float *sd, int type) {
-    int reading_tot = 0;  
-    float sensor_data [30];
-    float sd_sum =0;
-    //pressure calculations
-    if(type == 1){
-        //calculate average
-        for (int i = 0; i < PressT_count; i++) {
-            sensor_data[i] = sensor_measure(1);
-            reading_tot += sensor_data[i];
-            delay(30);
-        }  
-
-        //calculate standard deviation
-        *avg = reading_tot/PressT_count;
-        for(int j= 0; j<PressT_count; j++){
-            sd_sum += pow((*avg) - sensor_data[j], 2);
-        }
-        *sd = sqrt(sd_sum/PressT_count);
-    }
-    //flow calculations
-    else{
-        //calculate average
-        for (int i = 0; i < FlowT_count; i++) {
-            sensor_data[i] = sensor_measure(2);
-            reading_tot += sensor_data[i];
-            delay(1000);
-        }   
-        *avg = reading_tot /FlowT_count;
-
-        //calculate standard deviation
-        for(int j= 0; j<FlowT_count; j++){
-            sd_sum += pow((*avg) - sensor_data[j], 2);
-        }
-        *sd = sqrt(sd_sum/FlowT_count);
-    }
-}
-
-void setup() {
-    Serial.begin(115200);
-    delay(2000);
-    Serial.println("\n=== Starting ESP32 ===");
-
-    // Start Access Point
+    // 1. Create Access Point
     WiFi.softAP("ESP32_Broker", "12345678");
     Serial.println("Access Point Started");
     Serial.print("AP IP Address: ");
-    Serial.println(WiFi.softAPIP());
-
-    // Setup MQTT
+    Serial.println(WiFi.softAPIP()); // Should be 192.168.4.1
+    
+    // 2. Setup MQTT (connecting to broker on THIS device)
     client.setServer(mqtt_broker, mqtt_port);
     client.setCallback(callback);
-
-    pinMode(FLOW_PIN, INPUT); 
-    pinMode(TOP_VALVE_PIN, OUTPUT);
-    pinMode(BOTTOM_VALVE_PIN, OUTPUT);
-    pinMode(PUMP_PIN, OUTPUT);
-
-    digitalWrite(PRESS_PIN, HIGH); 
-    attachInterrupt(digitalPinToInterrupt(FLOW_PIN), flow, RISING);
-    digitalWrite(TOP_VALVE_PIN, LOW); //close top valve
-    publish_msg("SHUT", top_valve);
-
-    digitalWrite(BOTTOM_VALVE_PIN, HIGH); //open bottom valve
-    publish_msg("OPEN", bottom_valve);
-
-    digitalWrite(PUMP_PIN, HIGH); //turn on pump
-    publish_msg("ON", pump_topic);
-
-
-    //1 or 2 depending on which sensor 
-    find_threshold(&press_threshold, &press_sd, 1);
-    Serial.println("pressure threshold is ");
-    Serial.print(press_threshold);
-    find_threshold(&flow_threshold, &flow_sd, 2);
-    Serial.println("flow threshold is " );
-    Serial.print(flow_threshold); 
-
-    // Initial MQTT connection
-    reconnect();
 }
+void ConnectMQTT() {
+    while (!client.connected() && (!isReadyEnableOn()) ) {
+        String client_id = "esp32-client-" + String(WiFi.macAddress());
+        Serial.printf("Connecting to MQTT as %s...\n", client_id.c_str());
+        displayStatus("Connecting", "to Client");
+        
+        if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
+            Serial.println("MQTT Connected!");
+            client.publish(ready_topic, "YES");
+            client.subscribe(pump_topic);
+            client.subscribe(topVal_topic);
+            client.subscribe(bottomVal_topic);                        
+        } else {
+            Serial.print("Failed, rc=");
+            Serial.print(client.state());
+            Serial.println(" - try again in 5 seconds");
+            int length = 5000;
+            for (int i = 0; i < 5000; i++) {
+                delay(1);
+
+                if (isReadyEnableOn()) {
+                    return;   // skip connecting, leave function immediately
+                }
+            }
+        }
+    }
+}
+
+float current_pressure_threshold = 0;
+float current_flow_threshold = 0;
+float pressure_sd = 0;
+float flow_sd = 0;
+
+float getFlow() {
+  return flowRate;
+}
+
+void updateFlow() {
+  unsigned long now = millis();
+  unsigned long elapsed = now - lastFlowUpdate;
+
+  if (elapsed >= 1000) {
+    noInterrupts();
+    int count = pulseCount;
+    pulseCount = 0;
+    interrupts();
+
+    float frequency = (count * 1000.0) / elapsed; // pulses per second
+    flowRate = frequency / 7.5;                   // L/min
+
+    lastFlowUpdate = now;
+  }
+}
+
+void CalculateThresholds(int valuesPerSecond, int Seconds) {
+
+    lastFlowUpdate = millis();
+    noInterrupts();
+    pulseCount = 0;
+    interrupts();
+
+    float PressureSum = 0;
+    float FlowSum = 0;
+
+    float currentPressureReading = 0;
+    float currentFlowReading = 0;
+
+    int totalCalculations = valuesPerSecond * Seconds;
+    int delayPerSample = 1000 / valuesPerSecond;
+
+    int flow_data[100];
+    int pressure_data[100];
+
+    int flowSamples = 0;              // count how many flow samples we take
+    unsigned long lastFlowSample = millis();
+
+    displayStatus("Calculating", "Thresholds");
+    int animation_counter = 0;
+
+    for (int i = 0; i < totalCalculations; i++) {
+
+        // --- Always update flow in background ---
+        updateFlow();
+
+
+        const char* animation = "";
+        if (animation_counter == 0) {
+            animation = "";
+        } else if (animation_counter == 1) {
+            animation = ".";
+        } else if (animation_counter == 2) {
+            animation = "..";
+        } else if (animation_counter == 3) {
+            animation = "...";
+            animation_counter = 0;
+          }
+
+        animation_counter++;
+        char buffer[30];
+        snprintf(buffer, sizeof(buffer), "Thresholds %s", animation);
+
+        displayStatus("Calculating", buffer);   
+        // --- Pressure sampling (fast) ---
+        currentPressureReading = getPressure();
+        PressureSum += currentPressureReading;
+        pressure_data[i] = currentPressureReading;
+
+        // --- Flow sampling (ONLY every 1000 ms) ---
+        unsigned long now = millis();
+        if (now - lastFlowSample >= 1000) {
+            lastFlowSample = now;
+
+            currentFlowReading = getFlow();
+            FlowSum += currentFlowReading;
+            flow_data[i] = currentFlowReading;
+            flowSamples++;
+        }
+
+        delay(delayPerSample);
+    }
+
+    // --- Final averages ---
+    current_pressure_threshold = PressureSum / totalCalculations;
+    int pressure_sd_sum = 0;
+    int flow_sd_sum = 0;
+
+    for(int i; i<100; i++){
+      pressure_sd_sum += power(current_pressure_threshold - pressure_data[i], 2);    
+      flow_sd_sum += power(current_flow_threshold - flow_data[i], 2);
+    }
+
+    pressure_sd = sqrt(pressure_sd_sum / totalCalculations);
+    flow_sd = sqrt(flow_sd_sum / totalCalculations);
+
+    if (flowSamples > 0) {
+        current_flow_threshold = FlowSum / flowSamples;
+    } else {
+        current_flow_threshold = 0; // safety fallback
+    }
+}
+
+
+void TurnOnPump() {
+    if (digitalRead(top_valve) == LOW && digitalRead(bottom_valve) == LOW) {
+        displayStatus("Cannot turn", "on Pump");                                   //Protection for Pump
+    } else {
+        digitalWrite(pump, HIGH);
+    }
+}
+
+const int pwmFreq = 5000;
+const int pwmResolution = 8;   // duty 0-255
+
+void fadeTankStripOnce() {
+  for (int duty = 0; duty <= 255; duty++) {
+    ledcWrite(tank_strip, duty);
+    delay(3);
+  }
+
+  for (int duty = 255; duty >= 0; duty--) {
+    ledcWrite(tank_strip, duty);
+    delay(3);
+  }
+}
+
+void setup() {
+
+
+pinMode(pump, OUTPUT);
+pinMode(top_valve, OUTPUT);
+pinMode(bottom_valve, OUTPUT);
+pinMode(tank_strip, OUTPUT);
+
+pinMode(pump_enable, INPUT_PULLUP);
+pinMode(top_enable, INPUT_PULLUP);
+pinMode(bottom_enable, INPUT_PULLUP);
+pinMode(ready_enable, INPUT_PULLUP);
+
+pinMode(pressureSensorPin, INPUT);
+pinMode(flowSensorPin, INPUT);
+attachInterrupt(digitalPinToInterrupt(flowSensorPin), countPulse, RISING);
+lastFlowUpdate = millis();
+
+ledcAttach(tank_strip, pwmFreq, pwmResolution);
+ledcWrite(tank_strip, 0);   // start off
+
+
+    Serial.begin(115200);
+    Wire.begin(21, 22);
+    u8g2.begin();
+
+    TurnOnTankStrip();
+
+    delay(2000);
+
+    SetupMQTT();
+
+    ConnectMQTT();
+
+    //State 3
+
+        while (isReadyEnableOn()) {
+            displayStatus("Flip Switch 4", "");
+            // waiting...
+        }
+
+    //State 4
+
+        OpenBottomValve();
+          for (int i = 7; i >= 0; i--) {
+              char buffer[32];
+              sprintf(buffer, "Opening: %d", i);
+              displayStatus(buffer, "");
+              delay(1000);
+          }
+        
+
+    //State 5
+
+        TurnOnPump();
+        displayStatus("Turning", "on pump");
+        delay(3000); //let water settle in pipes
+
+        CalculateThresholds(10,10);
+        client.publish(ready_topic, "YES"); //Ready
+
+
+}
+
+
+
+unsigned long previousTime = 0;
+const unsigned long interval = 1000;
+
+float current_pressure = 0;
+float current_flow = 0;
 
 void loop() {
-    static float flow_tot = 0;; 
-    static float press_tot = 0;
-    static float flow_avg; 
-    static float press_avg;
-    static int count;
 
-    // Maintain MQTT connection
-    if (!client.connected()) {
-        reconnect();
+  updateFlow();
+
+  float leak_buffer = 0.3;
+  float block_buffer = 2.0;
+  float critical_buffer = 3.0;
+
+
+
+  unsigned long now = millis();
+
+
+
+  // --- read pressure every 500 ms ---
+  if (now - lastPressureRead >= pressureInterval) {
+    lastPressureRead = now;
+    current_pressure = getPressure();
+    current_flow = getFlow();
+
+    Serial.print("Pressure: ");
+    Serial.println(current_pressure);
+  }
+
+  char Pressuremsg[10];
+  char Flowmsg[10];
+  dtostrf(current_pressure, 4, 2, Pressuremsg);  // (value, width, decimal places, buffer)
+  dtostrf(current_flow, 4, 2, Flowmsg);  // (value, width, decimal places, buffer)
+
+  displayPressureAndFlow(current_pressure,current_flow, current_pressure_threshold, current_flow_threshold);
+
+  client.publish(pressure_topic, Pressuremsg);
+  client.publish(pump_topic, Flowmsg); 
+
+
+if (current_pressure <= (current_pressure_threshold - pressure_sd) || current_flow <= (current_flow_threshold-flow_sd)) {                             //Leak Detected
+    client.publish(ready_topic, "NO");
+    displayStatus("Leak Detected", "");
+    TurnOffPump();
+    for (int i = 0; i < 2; i++) {
+      fadeTankStripOnce();
     }
-    client.loop();
-    static unsigned long lastRead = 0;
 
-    if (millis() - lastRead >= 1000) {
-        lastRead+= 1000;
-
-        for(int i =0; i<10; i++){
-            press_tot+= sensor_measure(1);
-            delay(30);
-        }
-        float press_avg = press_tot/10;
-
-        for(int i =0; i<10; i++){
-            flow_tot+= sensor_measure(2);
-            delay(50);
-        }
-        float flow_avg = flow_tot/10;
-
-        //-----pressure sensor----------
-        char pressString[10];
-        dtostrf(press_avg,1,2,pressString);
-        publish_msg(pressString, pressure_topic);
-
-        //-----flow sensor----------
-        char flowString[10];
-        dtostrf(flow_avg,1,2,flowString);
-        publish_msg(flowString, flow_topic); 
-
-        //higher pressure or flow than norm
-        if(press_avg<(press_threshold - press_sd) || flow_avg<(flow_threshold - flow_sd)){
-            publish_msg("LEAK", status_topic);
-            //turn off pump
-            digitalWrite(PUMP_PIN, LOW);
-        }
-        
-        //lower pressure or flow than norm
-        else if(press_avg > (press_threshold + press_sd) || flow_avg >(flow_threshold + flow_sd)){
-            publish_msg("BLOCK", status_topic);
-            //open top valve
-            digitalWrite(TOP_VALVE_PIN, HIGH);
-            //close bottom valve
-            digitalWrite(BOTTOM_VALVE_PIN, LOW);
-        }
+    while (!isReadyEnableOn()) {
+        displayStatus("Toggle Switch #4", "to reset");
     }
+    while (isReadyEnableOn()) {
+        displayStatus("Toggle Switch #4", "to reset");
+    }
+    TurnOnPump();
+    TurnOnTankStrip();
+    displayStatus("Turning", "on Pump");
+    delay(3000);
+    CalculateThresholds(10, 10);
+    client.publish(ready_topic, "YES");
+
 }
+else if (current_pressure >= (current_pressure_threshold + pressure_sd) || current_flow >=(current_flow_threshold+ flow_sd)) {                             //Critical Detected
+      displayStatus("Pressure too high", "system shutdown");
+      client.publish(ready_topic, "NO");
+      for (int i = 0; i < 2; i++) {
+        fadeTankStripOnce();
+      }
+      TurnOffPump();    
+
+      while (!isReadyEnableOn()) {
+        displayStatus("Toggle Switch #4", "reset");
+      }
+      while (isReadyEnableOn()) {
+        displayStatus("Toggle Switch #4", "to reset");
+      }
+      CalculateThresholds(10,10);
+      client.publish(ready_topic, "YES");
+}
+else if (current_pressure >= (current_pressure_threshold + block_buffer)) {                             //Blockage Detected
+      client.publish(ready_topic, "NO");
+      displayStatus("Blockage", "Detected");
+
+
+      OpenTopValve();
+      for (int i = 0; i < 2; i++) {
+        fadeTankStripOnce();
+          displayStatus("Rerouting Water", "");         
+      }
+      TurnOnTankStrip();
+      CloseBottomValve();   
+
+      while (!isReadyEnableOn()) {
+        displayStatus("Toggle Switch #4", "to reset");
+      }
+      while (isReadyEnableOn()) {
+        displayStatus("Toggle Switch #4", "to reset");
+        TurnOffPump();
+      }
+      OpenBottomValve();
+      CloseTopValve();
+        for (int i = 7; i >= 0; i--) {
+      char buffer[32];
+      sprintf(buffer, "Resetting: %d", i);
+      displayStatus(buffer, "");
+      delay(1000);
+         }
+      TurnOnPump();
+      CalculateThresholds(10,10);
+      client.publish(ready_topic, "YES");   
+}
+
+
+
+
+
+
+  // if (isPumpEnableOn()) {
+  //     TurnOnPump();
+
+  // if (!isPumpEnableOn()) {
+  //     TurnOffPump();
+  // }
+
+
+  // if (isTopEnableOn()) {
+  //     OpenTopValve();
+  // }
+
+  // if (isBottomEnableOn()) {
+  //     OpenBottomValve();
+  // }
+
+
+  //if (!client.connected()) {
+  //    ConnectMQTT();
+  //}
+  //client.loop();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
