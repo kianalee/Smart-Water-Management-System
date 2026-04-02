@@ -51,17 +51,23 @@ mqttClient.on('connect', () => {
 });
 
 mqttClient.on('message', (topic, message) => {
-
-    if (topic =='esp32/pressure ' || topic =='esp32/flow '){
+    if (topic =='esp32/pressure' || topic =='esp32/flow'){
         const value = parseFloat(message.toString());
         if (isNaN(value)) {
             console.warn(`Invalid value received on ${topic}: ${message.toString()}`);
             return;
         }
-        const tableName = topic === 'esp32/pressure' ? 'pressure_readings' : 'flow_readings';
-        const insert = db.prepare(`INSERT INTO ${tableName} (value) VALUES (?)`);
-        insert.run(value);
-        console.log(`Saved [${topic}]: ${value}`);
+        if (topic =='esp32/pressure'){
+            const insert = db.prepare('INSERT INTO pressure_readings (value) VALUES (?)');
+            insert.run(value);
+            console.log(`Saved [pressure]: ${value} psi`);
+        }
+        else if (topic =='esp32/flow'){
+            const insert = db.prepare('INSERT INTO flow_readings (value) VALUES (?)');
+            insert.run(value);
+            console.log(`Saved [flow]: ${value} L/min`);
+        }
+
     }
     else{
         const insert = db.prepare('INSERT INTO system_updates (topic, value) VALUES (?, ?)');
