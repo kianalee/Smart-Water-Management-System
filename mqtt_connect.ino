@@ -53,6 +53,9 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
 const int pwmFreq       = 5000;
 const int pwmResolution = 8;    // duty cycle 0–255
 
+// WiFi Settings
+const char *ssid = "Plymouth";         // Same network as MQTT broker
+const char *password = "rwee2763";
 // =====================================================
 // MQTT / WIFI CLIENTS
 // =====================================================
@@ -238,6 +241,27 @@ void callback(char *topic, byte *payload, unsigned int length) {
     Serial.print(": ");
     Serial.println(msg);
 
+    if(strcmp(topic, topVal_topic)==0){
+        if(strcmp(msg, "OPEN")== 0){
+            OpenTopValve();
+            CloseBottomValve();
+
+        }
+        else if(strcmp(msg, "CLOSE")==0){
+            OpenBottomValve();
+            CloseTopValve();
+        }
+    }
+
+    if (strcmp(topic, pump_topic)==0){
+        if(strcmp(msg, "ON")== 0){
+            TurnOnPump();
+        }
+        else if(strcmp(msg, "OFF")==0){
+            TurnOffPump();
+        }
+    }
+
     if (strcmp(topic, ready_topic) == 0) {
         if (strcmp(msg, "PAUSE") == 0) {
             is_system_ready = false;
@@ -263,12 +287,26 @@ void callback(char *topic, byte *payload, unsigned int length) {
         }
     }
 }
+void ConnectWiFi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+}
 
 void SetupMQTT() {
-    Serial.println("\n=== Starting ESP32 as Access Point ===");
-    WiFi.softAP("ESP32_Broker", "12345678");
-    Serial.print("AP IP Address: ");
-    Serial.println(WiFi.softAPIP());
+    // Serial.println("\n=== Starting ESP32 as Access Point ===");
+    // WiFi.softAP("ESP32_Broker", "12345678");
+    // Serial.print("AP IP Address: ");
+    // Serial.println(WiFi.softAPIP());
+
+    ConnectWiFi();
 
     client.setServer(mqtt_broker, mqtt_port);
     client.setCallback(callback);
@@ -334,21 +372,23 @@ void CalculateThresholds(int valuesPerSecond, int seconds) {
     for (int i = 0; i < totalCalculations; i++) {
         updateFlow();
 
-        char buffer[30];
-        snprintf(buffer, sizeof(buffer), "Thresholds %s", animations[animation_counter]);
-        animation_counter = (animation_counter + 1) % 4;
-        displayStatus("Calculating", buffer);
+        // char buffer[30];
+        // snprintf(buffer, sizeof(buffer), "Thresholds %s", animations[animation_counter]);
+        // animation_counter = (animation_counter + 1) % 4;
 
         // Pressure sample (fast)
         pressure_data[i]  = getPressure();
         PressureSum       += pressure_data[i];
 
+        displayStatus("Calc. Threshold", String(pressure_data [i]).c_str());
+
+
         // Flow sample (only once per second)
         unsigned long now = millis();
         if (now - lastFlowSample >= 1000) {
             lastFlowSample    = now;
-            flow_data[i]      = getFlow();
-            FlowSum           += flow_data[i];
+            flow_data[flowSamples]      = getFlow();
+            FlowSum           += flow_data[flowSamples];
             flowSamples++;
         }
 
@@ -488,7 +528,7 @@ void loop() {
 
         // Blockage: pressure too high (check before critical to keep correct ordering)
         else if (current_pressure >= (current_pressure_threshold + pressure_sd) ||
-                 current_flow     >= (current_flow_threshold     + flow_sd)) {
+                 current_flow     >= (current_flow_threshold     + flow_sd)){
 
             client.publish(status_topic, "BLOCK");
             displayStatus("Blockage", "Detected");
@@ -515,20 +555,6 @@ void loop() {
             TurnOnPump();
             CalculateThresholds(10, 10);
             client.publish(ready_topic, "YES");
-        }
-
-        // Override: if override switch is on, skip anomaly checks and just display override status
-        else {
-            if (isPumpEnableOn()) {
-                client.publish(override_topic, "Pump Override");
-                displayStatus("Pump Override", "Enabled");
-            } else if (isTopEnableOn()) {
-                client.publish(override_topic, "Top Valve Override");
-                displayStatus("Top Valve", "Override");
-            } else if (isBottomEnableOn()) {
-                client.publish(override_topic, "Bottom Valve Override");
-                displayStatus("Bottom Valve", "Override");
-            }
         }
     }
 }
