@@ -14,18 +14,18 @@ db.exec(`
     CREATE TABLE IF NOT EXISTS pressure_readings (
         id INTEGER PRIMARY KEY,
         value REAL NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT (datetime('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS flow_readings (
         id INTEGER PRIMARY KEY,
         value REAL NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT (datetime('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS system_updates (
         id INTEGER PRIMARY KEY,
         topic TEXT NOT NULL,
         value TEXT NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT (datetime('now', 'localtime'))
     );
 `);
 
@@ -36,15 +36,14 @@ const mqttClient = mqtt.connect('mqtt://192.168.4.2:1883', {
     username: 'master',
     password: 'masterpass'
 });
-const systemTopics = ['top_valve', 'bottom_valve', 'system_ready', 'system_status', 'override_status'];
 
 mqttClient.on('connect', () => {
     console.log('Connected to MQTT broker');
     mqttClient.subscribe('esp32/pressure', { nl: true });
     mqttClient.subscribe('esp32/flow', {nl:true});
     mqttClient.subscribe('esp32/pump', {nl:true});
-    mqttClient.subscribe('top_valve', {nl:true});
-    mqttClient.subscribe('bottom_valve', {nl:true});
+    mqttClient.subscribe('esp32/top_valve', {nl:true});
+    mqttClient.subscribe('esp32/bottom_valve', {nl:true});
     mqttClient.subscribe('system_ready', {nl:true});
     mqttClient.subscribe('system_status', {nl:true});
     mqttClient.subscribe('override_status', {nl:true});
@@ -157,6 +156,25 @@ app.get('/api/system/latest/all', (req, res) => {
 app.delete('/api/system_updates', (req, res) => {
     db.prepare('DELETE FROM system_updates').run();
     res.json({ message: 'All readings deleted' });
+});
+// ─── REST API Endpoints (Commands) ────────────────────────────────────────
+
+// Send a command to the ESP32 (e.g., POST { "topic": "system_ready", "message": "PAUSE" })
+app.post('/api/command', (req, res) => {
+    const { topic, message } = req.body;
+    
+    if (!topic || !message) {
+        return res.status(400).json({ error: 'Both topic and message are required' });
+    }
+
+    mqttClient.publish(topic, message, (err) => {
+        if (err) {
+            console.error(`Failed to publish message to ${topic}:`, err);
+            return res.status(500).json({ error: 'Failed to publish to MQTT' });
+        }
+        console.log(`Published [${topic}]: ${message}`);
+        res.json({ success: true, topic, message });
+    });
 });
 
 // ─── Start Server ──────────────────────────────────────────────
